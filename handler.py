@@ -69,13 +69,21 @@ def handler(event):
     input_data = event.get("input", {})
 
     prompt = input_data.get("prompt", "A beautiful landscape")
-    width = input_data.get("width", 512)   # default smaller size for GPU safety
+    width = input_data.get("width", 512)
     height = input_data.get("height", 512)
     steps = input_data.get("steps", 20)
 
     try:
         image_base64 = generate_image(prompt, width, height, steps)
-        return {"image": image_base64}
+        return {
+            "output": {
+                "image": image_base64,
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "steps": steps
+            }
+        }
     except Exception as e:
         return {"error": str(e)}
 
