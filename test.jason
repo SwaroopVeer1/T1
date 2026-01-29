@@ -1,0 +1,10 @@
+{
+  "input": {
+    "prompt": "A detailed illustration of a futuristic monsoon skyline with warm reflections",
+    "height": 768,
+    "width": 768,
+    "num_inference_steps": 28,
+    "guidance_scale": 3.5,
+    "seed": 42
+  }
+}
