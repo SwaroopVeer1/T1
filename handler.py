@@ -46,7 +46,9 @@ def generate_image(prompt: str, width: int, height: int, steps: int) -> str:
 
         buffer = BytesIO()
         image.save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+        image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        print(f"Generated image length: {len(image_base64)}")  # Debug
+        return image_base64
     except Exception as e:
         print(f"Error generating image: {e}")
         raise e
@@ -85,6 +87,7 @@ def handler(event):
             }
         }
     except Exception as e:
+        print(f"Handler error: {e}")
         return {"error": str(e)}
 
 # ------------------------------
