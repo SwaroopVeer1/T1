@@ -1,96 +1,120 @@
+# handler.py
 import os
+import io
+import time
+import base64
 import runpod
 import torch
-import base64
-from io import BytesIO
+from PIL import Image
 from diffusers import FluxPipeline
 
-# ------------------------------
-# 1. Load Hugging Face token from environment
-# ------------------------------
-HF_TOKEN = os.getenv("HF_TOKEN")
-if not HF_TOKEN:
-    raise ValueError(
-        "HF_TOKEN environment variable not set! "
-        "Please add it in RunPod dashboard."
-    )
+# -------------- Model init (once per worker) --------------
+PIPE = None
 
-# ------------------------------
-# 2. Load the FLUX model once at startup
-# ------------------------------
-print("Loading FLUX model...")
-try:
-    pipe = FluxPipeline.from_pretrained(
-        "black-forest-labs/FLUX.1-dev",
-        use_auth_token=HF_TOKEN,
-        torch_dtype=torch.float16
-    )
-    pipe.to("cuda")
-    print("FLUX model loaded successfully.")
-except Exception as e:
-    print(f"Error loading FLUX model: {e}")
-    raise e
+def load_pipeline():
+    """
+    Load the FLUX.1-dev pipeline with Diffusers.
+    Authentication:
+      - Set HF_TOKEN environment variable in your endpoint settings.
+    """
+    global PIPE
+    if PIPE is not None:
+        return PIPE
 
-# ------------------------------
-# 3. Helper function to generate Base64 image
-# ------------------------------
-def generate_image(prompt: str, width: int, height: int, steps: int) -> str:
-    try:
-        image = pipe(
-            prompt=prompt,
-            width=width,
-            height=height,
-            num_inference_steps=steps,
-            guidance_scale=3.5
-        ).images[0]
+    model_id = os.environ.get("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-dev")
+    dtype = torch.bfloat16  # per HF examples for FLUX
+    token = os.environ.get("HF_TOKEN")  # picked up by huggingface_hub if set
 
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        print(f"Generated image length: {len(image_base64)}")  # Debug
-        return image_base64
-    except Exception as e:
-        print(f"Error generating image: {e}")
-        raise e
+    # Download and load the model
+    PIPE = FluxPipeline.from_pretrained(model_id, torch_dtype=dtype)
+    # Offload to CPU when idle to reduce VRAM; remove if you have ample GPU
+    PIPE.enable_model_cpu_offload()
 
-# ------------------------------
-# 4. Serverless handler
-# ------------------------------
+    return PIPE
+
+# -------------- Utility --------------
+def pil_to_base64_png(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+# -------------- RunPod handler --------------
 def handler(event):
     """
-    Expected input JSON:
+    Expected JSON:
     {
-        "input": {
-            "prompt": "A futuristic city at sunset",
-            "width": 512,
-            "height": 512,
-            "steps": 20
-        }
+      "input": {
+        "prompt": "A cinematic photo of ...",
+        "negative_prompt": "",
+        "height": 1024,
+        "width": 1024,
+        "num_inference_steps": 40,
+        "guidance_scale": 3.5,
+        "max_sequence_length": 512,
+        "seed": 12345
+      }
     }
     """
-    input_data = event.get("input", {})
+    t0 = time.time()
+    job_input = event.get("input", {}) or {}
 
-    prompt = input_data.get("prompt", "A beautiful landscape")
-    width = input_data.get("width", 512)
-    height = input_data.get("height", 512)
-    steps = input_data.get("steps", 20)
+    prompt = job_input.get("prompt")
+    if not prompt:
+        return {"error": "Missing required field: input.prompt"}
+
+    negative_prompt   = job_input.get("negative_prompt", None)
+    height            = int(job_input.get("height", 1024))
+    width             = int(job_input.get("width", 1024))
+    steps             = int(job_input.get("num_inference_steps", 40))
+    guidance_scale    = float(job_input.get("guidance_scale", 3.5))
+    max_seq_len       = int(job_input.get("max_sequence_length", 512))
+    seed              = job_input.get("seed", None)
+
+    # Seed handling
+    generator = None
+    if seed is not None:
+        try:
+            seed = int(seed)
+        except Exception:
+            return {"error": "input.seed must be an integer."}
+        generator = torch.Generator("cpu").manual_seed(seed)
 
     try:
-        image_base64 = generate_image(prompt, width, height, steps)
+        pipe = load_pipeline()
+
+        # Generate
+        image = pipe(
+            prompt,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            max_sequence_length=max_seq_len,
+            generator=generator,
+            output_type="pil",
+        ).images[0]
+
+        image_b64 = pil_to_base64_png(image)
         return {
-            "output": {
-                "image": image_base64,
+            "image_base64": image_b64,
+            "metadata": {
                 "prompt": prompt,
-                "width": width,
+                "negative_prompt": negative_prompt,
                 "height": height,
-                "steps": steps
+                "width": width,
+                "num_inference_steps": steps,
+                "guidance_scale": guidance_scale,
+                "max_sequence_length": max_seq_len,
+                "seed": seed,
+                "model_id": os.environ.get("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-dev"),
+                "latency_sec": round(time.time() - t0, 3),
             }
         }
     except Exception as e:
-        print(f"Handler error: {e}")
-        return {"error": str(e)}
+        # Returning an "error" key signals a failed job to RunPod
+        return {"error": f"Generation failed: {e}"}
 
-# ------------------------------
-# 5. Start RunPod serverless
-# ------------------------------
-runpod.serverless.start({"handler": handler})
+# This starts the Serverless worker loop
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
